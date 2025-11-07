@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Face Attendance</title>
+<style>
+:root{
+  --bg: #0e1a2b;
+  --card: #14223c;
+  --accent: #00d1ff;
+  --muted: #a0aec0;
+  --white: #e6eef6;
+  --gradient-start:#0e1a2b;
+  --gradient-end:#09121b;
+}
+body{
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  margin:0;
+  background: linear-gradient(180deg,var(--gradient-start),var(--gradient-end));
+  color: var(--white);
+  min-height:100vh;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
+.card{
+  background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
+  border-radius:16px;
+  padding:24px;
+  box-shadow:0 10px 30px rgba(0,0,0,0.7);
+}
+input,select,button{
+  width:100%;
+  padding:10px;
+  border-radius:12px;
+  border:none;
+  margin-bottom:12px;
+  font-size:14px;
+  background: rgba(255,255,255,0.05);
+  color: var(--white);
+}
+button{
+  background: var(--accent);
+  cursor:pointer;
+  transition: all 0.3s ease;
+}
+button:hover{
+  background: #00a8cc;
+}
+h1,h2,h3{
+  margin:0 0 12px 0;
+}
+.login-panel{
+  width:360px;
+  text-align:center;
+  padding:32px;
+  backdrop-filter: blur(12px);
+  border:1px solid rgba(255,255,255,0.1);
+}
+.hidden{display:none;}
+.video-wrap{position:relative;}
+canvas{position:absolute;left:0;top:0;border-radius:8px;}
+.list{max-height:250px;overflow:auto;margin-top:8px;}
+table{width:100%;border-collapse:collapse;margin-top:8px;}
+td,th{padding:8px;border-bottom:1px solid rgba(255,255,255,0.1);font-size:13px;text-align:left;}
+.controls{display:flex;gap:8px;margin-top:8px;}
+.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;}
+.muted{color: var(--muted);}
+</style>
+</head>
+<body>
+
+<div id="login" class="card login-panel">
+  <h1>Face Attendance Login</h1>
+  <div class="muted">Enter your credentials</div>
+  <input id="username" placeholder="PROJECT"/>
+  <input id="password" type="password" placeholder="admin143"/>
+  <button id="btnLogin">Login</button>
+</div>
+
+<div id="app" class="hidden" style="width:90%; max-width:1200px; margin:20px auto;">
+  <div class="top">
+    <h1>Face Attendance Dashboard</h1>
+    <button id="btnLogout">Logout</button>
+  </div>
+  <div style="display:grid;grid-template-columns:320px 1fr;gap:16px;">
+    <div class="card">
+      <h2>Add / Register Student</h2>
+      <input id="inpName" placeholder="Full name"/>
+      <input id="inpClass" placeholder="Class (e.g. 12A)"/>
+      <select id="inpGender"><option>Male</option><option>Female</option><option>Other</option></select>
+      <input id="inpRoll" placeholder="Roll number"/>
+      <button id="startCamera">Open Camera</button>
+      <div class="controls">
+        <button id="capture">Capture Face</button>
+        <button id="uploadImage">Upload Image</button>
+        <input id="imageFile" type="file" accept="image/*" class="hidden"/>
+      </div>
+      <h3>Registered Students</h3>
+      <div class="list" id="studentsList"></div>
+      <button id="clearStudents">Clear Students</button>
+    </div>
+
+    <div class="card">
+      <h2>Live Recognition & Attendance</h2>
+      <div class="video-wrap">
+        <video id="video" width="720" height="560" autoplay muted playsinline style="background:#020615;border-radius:8px"></video>
+        <canvas id="overlay" width="720" height="560"></canvas>
+      </div>
+      <div class="controls">
+        <button id="startRecognition">Start Recognition</button>
+        <button id="stopRecognition">Stop</button>
+        <button id="clearAttendance">Clear Attendance</button>
+      </div>
+      <h3>Attendance (Today)</h3>
+      <div class="list" id="attendanceList"></div>
+    </div>
+  </div>
+</div>
+
+<audio id="captureSound" src="https://actions.google.com/sounds/v1/cartoon/wood_plank_flicks.ogg"></audio>
+<audio id="beepSound" src="https://actions.google.com/sounds/v1/alarms/beep_short.ogg"></audio>
+
+<script defer src="https://unpkg.com/face-api.js@0.22.2/dist/face-api.min.js"></script>
+<script>
+const STORAGE_STUDENTS='face_students_v1';
+const STORAGE_ATTENDANCE='face_attendance_v1';
+let labeledDescriptors=[], faceMatcher=null, recognitionInterval=null, videoStream=null;
+
+function saveStudentsToStorage(){localStorage.setItem(STORAGE_STUDENTS, JSON.stringify(labeledDescriptors.map(s=>({label:s.label, descriptors:s.descriptors.map(d=>Array.from(d)), meta:s.meta}))));}
+function loadStudentsFromStorage(){try{return (JSON.parse(localStorage.getItem(STORAGE_STUDENTS)||'[]')).map(s=>({label:s.label, descriptors:s.descriptors.map(d=>new Float32Array(d)), meta:s.meta}));}catch(e){return []}}
+function saveAttendance(att){const todays=JSON.parse(localStorage.getItem(STORAGE_ATTENDANCE)||'{}');const dt=(new Date()).toISOString().split('T')[0];if(!todays[dt]) todays[dt]=[]; if(!todays[dt].some(x=>x.label===att.label)) todays[dt].push(att);localStorage.setItem(STORAGE_ATTENDANCE,JSON.stringify(todays));}
+function loadAttendanceForToday(){const todays=JSON.parse(localStorage.getItem(STORAGE_ATTENDANCE)||'{}');const dt=(new Date()).toISOString().split('T')[0];return todays[dt]||[];}
+function clearAttendanceToday(){const todays=JSON.parse(localStorage.getItem(STORAGE_ATTENDANCE)||'{}');const dt=(new Date()).toISOString().split('T')[0];delete todays[dt];localStorage.setItem(STORAGE_ATTENDANCE,JSON.stringify(todays));}
+
+const loginEl=document.getElementById('login');
+const appEl=document.getElementById('app');
+const btnLogin=document.getElementById('btnLogin');
+const btnLogout=document.getElementById('btnLogout');
+const usernameEl=document.getElementById('username');
+const passwordEl=document.getElementById('password');
+const startCameraBtn=document.getElementById('startCamera');
+const captureBtn=document.getElementById('capture');
+const uploadBtn=document.getElementById('uploadImage');
+const imageFileInput=document.getElementById('imageFile');
+const studentsListEl=document.getElementById('studentsList');
+const clearStudentsBtn=document.getElementById('clearStudents');
+const video=document.getElementById('video');
+const overlay=document.getElementById('overlay');
+const overlayCtx=overlay.getContext('2d');
+const startRecBtn=document.getElementById('startRecognition');
+const stopRecBtn=document.getElementById('stopRecognition');
+const attendanceListEl=document.getElementById('attendanceList');
+const clearAttendanceBtn=document.getElementById('clearAttendance');
+const inpName=document.getElementById('inpName');
+const inpClass=document.getElementById('inpClass');
+const inpGender=document.getElementById('inpGender');
+const inpRoll=document.getElementById('inpRoll');
+
+btnLogin.addEventListener('click',()=>{
+  if(usernameEl.value.trim()==='PROJECT' && passwordEl.value==='admin143'){
+    loginEl.classList.add('hidden');
+    appEl.classList.remove('hidden');
+    initApp();
+  }else{alert('Invalid credentials');}
+});
+btnLogout.addEventListener('click',()=>{
+  appEl.classList.add('hidden');
+  loginEl.classList.remove('hidden');
+  stopVideo();
+});
+
+async function loadModels(){
+  const MODEL_URL='./models';
+  await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+  await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+  await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+}
+async function initApp(){
+  try{await loadModels();}catch(e){alert('Models not loaded'); return;}
+  labeledDescriptors=loadStudentsFromStorage();
+  rebuildFaceMatcher();
+  renderStudents();
+  renderAttendance();
+}
+async function startVideo(){
+  if(videoStream) return;
+  try{
+    videoStream=await navigator.mediaDevices.getUserMedia({video:{width:720,height:560},audio:false});
+    video.srcObject=videoStream;
+    await video.play();
+    overlay.width=video.videoWidth||720;
+    overlay.height=video.videoHeight||560;
+  }catch(e){alert('Cannot access camera');}
+}
+function stopVideo(){if(videoStream){videoStream.getTracks().forEach(t=>t.stop()); videoStream=null;} if(recognitionInterval) clearInterval(recognitionInterval); overlayCtx.clearRect(0,0,overlay.width,overlay.height);}
+startCameraBtn.addEventListener('click',async()=>{await startVideo();});
+
+async function captureFaceForStudent(){
+  if(!videoStream){alert('Start camera first'); return;}
+  const tmp=document.createElement('canvas'); tmp.width=video.videoWidth; tmp.height=video.videoHeight;
+  tmp.getContext('2d').drawImage(video,0,0,tmp.width,tmp.height);
+  const det=await faceapi.detectSingleFace(tmp,new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks().withFaceDescriptor();
+  if(!det){alert('No face detected'); return;}
+  addDescriptorToStudent(det.descriptor);
+}
+captureBtn.addEventListener('click',captureFaceForStudent);
+uploadBtn.addEventListener('click',()=>imageFileInput.click());
+imageFileInput.addEventListener('change',async(ev)=>{
+  const f=ev.target.files[0]; if(!f) return;
+  const img=await fileToImage(f);
+  const det=await faceapi.detectSingleFace(img,new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks().withFaceDescriptor();
+  if(!det){alert('No face detected'); return;}
+  addDescriptorToStudent(det.descriptor);
+  imageFileInput.value='';
+});
+function fileToImage(file){return new Promise((res,rej)=>{const img=new Image(); img.onload=()=>res(img); img.onerror=rej; img.src=URL.createObjectURL(file);});}
+
+function addDescriptorToStudent(descriptor){
+  const name=inpName.value.trim(); const cls=inpClass.value.trim();
+  const gender=inpGender.value; const roll=inpRoll.value.trim();
+  if(!name||!roll){alert('Provide Name and Roll No.'); return;}
+  const label=`${name}#${roll}`;
+  let student=labeledDescriptors.find(s=>s.label===label);
+  if(!student){student={label, descriptors:[], meta:{name,class:cls,gender,roll}}; labeledDescriptors.push(student);}
+  student.descriptors.push(descriptor);
+  saveStudentsToStorage();
+  rebuildFaceMatcher();
+  renderStudents();
+  document.getElementById('captureSound').play();
+  alert('Face saved for '+name);
+}
+
+clearStudentsBtn.addEventListener('click',()=>{
+  if(!confirm('Clear all registered students?')) return;
+  labeledDescriptors=[];
+  saveStudentsToStorage();
+  rebuildFaceMatcher();
+  renderStudents();
+});
+
+function rebuildFaceMatcher(){
+  if(labeledDescriptors.length===0){faceMatcher=null; return;}
+  faceMatcher=new faceapi.FaceMatcher(labeledDescriptors.map(ld=>new faceapi.LabeledFaceDescriptors(ld.label,ld.descriptors)),0.55);
+}
+function renderStudents(){
+  studentsListEl.innerHTML='';
+  if(labeledDescriptors.length===0){studentsListEl.innerHTML='<div class="muted">No students registered yet.</div>'; return;}
+  const t=document.createElement('table'); t.innerHTML='<thead><tr><th>Name</th><th>Class</th><th>Gender</th><th>Roll</th></tr></thead>';
+  const tbody=document.createElement('tbody');
+  labeledDescriptors.forEach(s=>{const tr=document.createElement('tr'); const m=s.meta; tr.innerHTML=`<td>${m.name}</td><td>${m.class||''}</td><td>${m.gender||''}</td><td>${m.roll}</td>`; tbody.appendChild(tr);});
+  t.appendChild(tbody); studentsListEl.appendChild(t);
+}
+function renderAttendance(){
+  attendanceListEl.innerHTML='';
+  const arr=loadAttendanceForToday();
+  if(!arr.length){attendanceListEl.innerHTML='<div class="muted">No attendance yet.</div>'; return;}
+  const t=document.createElement('table'); t.innerHTML='<thead><tr><th>Name</th><th>Class</th><th>Roll</th><th>Time</th></tr></thead>';
+  const tbody=document.createElement('tbody');
+  arr.forEach(a=>{const tr=document.createElement('tr'); tr.innerHTML=`<td>${a.meta.name}</td><td>${a.meta.class||''}</td><td>${a.meta.roll}</td><td>${new Date(a.time).toLocaleTimeString()}</td>`; tbody.appendChild(tr);});
+  t.appendChild(tbody); attendanceListEl.appendChild(t);
+}
+
+clearAttendanceBtn.addEventListener('click',()=>{
+  if(!confirm('Clear today\'s attendance?')) return;
+  clearAttendanceToday(); renderAttendance(); alert('Attendance cleared for today.');
+});
+
+startRecBtn.addEventListener('click',async()=>{
+  if(!videoStream) await startVideo();
+  if(!faceMatcher){alert('No students registered'); return;}
+  if(recognitionInterval) clearInterval(recognitionInterval);
+  recognitionInterval=setInterval(async()=>{
+    if(video.paused||video.ended) return;
+    const results=await faceapi.detectAllFaces(video,new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks().withFaceDescriptors();
+    overlayCtx.clearRect(0,0,overlay.width,overlay.height);
+    overlayCtx.font='14px Segoe UI';
+    overlayCtx.fillStyle='#00FFCC';
+    results.forEach(res=>{
+      const box=res.detection.box;
+      overlayCtx.strokeStyle='#00FFCC'; overlayCtx.lineWidth=2; overlayCtx.strokeRect(box.x,box.y,box.width,box.height);
+      const best=faceMatcher.findBestMatch(res.descriptor); let labelText=best.toString(); let meta=null;
+      if(best.label!=='unknown'){const stored=labeledDescriptors.find(s=>s.label===best.label); if(stored){meta=stored.meta; labelText=`${meta.name} — ${meta.class||''} — ${meta.gender||''} — ${meta.roll}`; saveAttendance({label:stored.label,meta,time:new Date().toISOString()}); if(!window.lastBeepTime) window.lastBeepTime=0; if(Date.now()-window.lastBeepTime>1000){document.getElementById('beepSound').play(); window.lastBeepTime=Date.now();}}}
+      const textWidth=overlayCtx.measureText(labelText).width+8;
+      overlayCtx.fillStyle='rgba(0,0,0,0.5)'; overlayCtx.fillRect(box.x,box.y-20,textWidth,20);
+      overlayCtx.fillStyle='#E6F6F7'; overlayCtx.fillText(labelText,box.x+4,box.y-6);
+    });
+    renderAttendance();
+  },400);
+});
+stopRecBtn.addEventListener('click',()=>{if(recognitionInterval) clearInterval(recognitionInterval); recognitionInterval=null; overlayCtx.clearRect(0,0,overlay.width,overlay.height);});
+
+window.addEventListener('beforeunload',()=>stopVideo());
+</script>
+</body>
+</html>
